@@ -1,0 +1,7 @@
+﻿__pycache__/
+*.pyc
+*.pyo
+*.pkl
+data/sim_log.jsonl
+benchmark_results.json
+.env
