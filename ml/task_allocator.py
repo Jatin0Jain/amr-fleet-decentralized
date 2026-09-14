@@ -166,21 +166,37 @@ class TaskAllocator:
         """
         Assign tasks by minimizing a composite cost score per (robot, task) pair.
 
-        TODO [ML PERSON]: Implement this on Day 2.
-        The cost score for assigning robot R to task T:
-            score = distance_to_pickup
-                  + path_length_estimate * 0.3
-                  + battery_penalty
-                  + congestion_on_path * 10
-
-        Steps:
-            1. For each (robot, task) pair, compute_score()
-            2. Solve assignment: greedily pick minimum score pairs
-               (Hungarian algorithm optional — greedy is fine for 3 robots)
-            3. Return {task_id: robot_id}
+        Uses compute_score() which incorporates distance, battery, load factor,
+        and congestion probability from the trained ML model.
         """
-        # Fallback to greedy if predictor not ready
-        return self._allocate_greedy(tasks, idle_robots)
+        if not self.congestion_predictor:
+            return self._allocate_greedy(tasks, idle_robots)
+
+        assignments: dict[str, str] = {}
+        available = list(idle_robots)
+        all_positions = [r.position for r in idle_robots]
+
+        # Sort tasks by priority (highest first)
+        sorted_tasks = sorted(tasks, key=lambda t: -t.priority)
+
+        for task in sorted_tasks:
+            if not available:
+                break
+
+            # Find robot with minimum cost score for this task
+            best_robot = None
+            best_score = float("inf")
+            for robot in available:
+                score = self.compute_score(robot, task, other_robot_positions=all_positions)
+                if score < best_score:
+                    best_score = score
+                    best_robot = robot
+
+            if best_robot:
+                assignments[task.task_id] = best_robot.robot_id
+                available.remove(best_robot)
+
+        return assignments
 
     def compute_score(
         self,

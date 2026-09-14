@@ -101,15 +101,32 @@ class CongestionPredictor:
 
     def _train(self, X: np.ndarray, y: np.ndarray) -> None:
         """Fit the RandomForest classifier and save to disk."""
-        # TODO [ML PERSON]: Implement training.
-        # Suggested:
-        #   X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-        #   self.model = RandomForestClassifier(n_estimators=100, random_state=42)
-        #   self.model.fit(X_train, y_train)
-        #   print(classification_report(y_test, self.model.predict(X_test)))
-        #   joblib.dump(self.model, MODEL_PATH)
-        #   self.is_trained = True
-        raise NotImplementedError("ML person: implement _train()")
+        if not SKLEARN_AVAILABLE:
+            print("[ERROR] sklearn not available — cannot train.")
+            return
+
+        print(f"[ML] Training on {len(X)} samples...")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        self.model = RandomForestClassifier(
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1,     # use all CPU cores
+            class_weight="balanced",  # handle imbalanced data
+        )
+        self.model.fit(X_train, y_train)
+
+        # Report accuracy
+        y_pred = self.model.predict(X_test)
+        print("[ML] Congestion model training complete.")
+        print(classification_report(y_test, y_pred, zero_division=0))
+
+        # Save model for future use
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        joblib.dump(self.model, MODEL_PATH)
+        print(f"[ML] Model saved to {MODEL_PATH}")
+        self.is_trained = True
 
     def load(self, path: str = MODEL_PATH) -> bool:
         """Load a previously trained model from disk."""

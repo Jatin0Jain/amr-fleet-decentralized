@@ -151,39 +151,99 @@ class Robot:
         Returns:
             self (for chaining / convenience).
         """
-        # TODO [DSA]: Implement the step logic.
-        #
-        # 1. Get action from resolver:
-        #    action = self.resolver.resolve([self] + other_robots, self.grid)[self.robot_id]
-        #    (or resolve is called centrally in sim_runner — coordinate with P2P person)
-        #
-        # 2. If ACTION_MOVE and self.planned_path:
-        #    - next_cell = self.planned_path[0]
-        #    - Reserve next_cell in grid
-        #    - Update self.velocity = (next_cell[0]-self.position[0], next_cell[1]-self.position[1])
-        #    - self.position = next_cell
-        #    - self.planned_path.pop(0)
-        #    - Check if arrived at pickup / dropoff → advance task_phase or complete task
-        #
-        # 3. If ACTION_WAIT:
-        #    - self.status = "waiting"
-        #    - self.velocity = (0, 0)
-        #    - if self.blocked_since == 0: self.blocked_since = time.time()
-        #
-        # 4. If ACTION_REROUTE:
-        #    - self.grid.clear_reservations(self.robot_id)
-        #    - self.blocked_since = 0.0
-        #    - self._replan()
-        #
-        # 5. Update battery:
-        #    if self.battery_model:
-        #        self.battery = self.battery_model.drain(self.status, dt)
-        #    else:
-        #        self.battery = max(0, self.battery - 0.01 * dt)   # simple fallback
-        #
-        # 6. If battery < 15%: self.status = "charging", go to nearest charge station
+        # 1. Get action from resolver
+        all_robots = [self] + other_robots
+        action = self.resolver.resolve(all_robots, self.grid)[self.robot_id]
 
-        raise NotImplementedError("DSA person: implement step()")
+        if action == ACTION_MOVE and self.planned_path:
+            # 2a. Move: advance to next cell on path
+            next_cell = self.planned_path[0]
+
+            # Try to reserve the next cell
+            reserved = self.grid.reserve_cell(
+                next_cell[0], next_cell[1], self.robot_id, duration=1.0
+            )
+
+            if reserved:
+                # Update velocity direction
+                self.velocity = (
+                    next_cell[0] - self.position[0],
+                    next_cell[1] - self.position[1],
+                )
+                # Clear old position reservation (other robots can move there now)
+                # (the old cell reservation will naturally expire)
+                self.position = next_cell
+                self.planned_path.pop(0)
+                self.status = "moving"
+                self.blocked_since = 0.0  # Reset block timer
+
+                # Check task phase completion
+                if self.current_task is not None:
+                    if (self.task_phase == "pickup"
+                            and self.position == self.current_task.pickup):
+                        # Arrived at pickup — now go to dropoff
+                        self.task_phase = "dropoff"
+                        self._replan()
+                    elif (self.task_phase == "dropoff"
+                          and self.position == self.current_task.dropoff):
+                        # Task complete!
+                        self.current_task = None
+                        self.task_phase = "pickup"
+                        self.planned_path = []
+                        self.status = "idle"
+                        self.velocity = (0, 0)
+            else:
+                # Couldn't reserve — treat as a wait
+                self.status = "waiting"
+                self.velocity = (0, 0)
+                if self.blocked_since == 0.0:
+                    self.blocked_since = time.time()
+
+        elif action == ACTION_MOVE and not self.planned_path:
+            # Moving but no path — either idle or needs replanning
+            self.velocity = (0, 0)
+            if self.current_task is not None and self.status != "idle":
+                self._replan()
+
+        elif action == ACTION_WAIT:
+            # 2b. Wait: stay still, increment blocked timer
+            self.status = "waiting"
+            self.velocity = (0, 0)
+            if self.blocked_since == 0.0:
+                self.blocked_since = time.time()
+
+        elif action == ACTION_REROUTE:
+            # 2c. Reroute: clear reservations, get a new path
+            self.grid.clear_reservations(self.robot_id)
+            self.blocked_since = 0.0
+            self.velocity = (0, 0)
+            self._replan()
+
+        # 3. Update battery
+        if self.battery_model:
+            self.battery = self.battery_model.drain(self.status, dt)
+        else:
+            # Simple fallback drain
+            drain_rate = {"moving": 0.033, "waiting": 0.008,
+                          "idle": 0.008, "charging": -0.5, "blocked": 0.012}
+            rate = drain_rate.get(self.status, 0.008)
+            self.battery = max(0.0, min(100.0, self.battery - rate * dt))
+
+        # 4. Low battery: go charge
+        if self.battery < 15.0 and self.status not in ("charging", "idle"):
+            from environment.warehouse_layout import nearest_charging_station
+            charge_pos = nearest_charging_station(self.position)
+            # Only reroute to charge if not already heading there
+            if not self.current_task or self.task_phase != "charging":
+                self.grid.clear_reservations(self.robot_id)
+                charge_goal = astar(self.grid, self.position, charge_pos,
+                                    self.robot_id, self.congestion_weights)
+                if charge_goal:
+                    self.planned_path = charge_goal[1:]
+                self.status = "charging"
+                self.current_task = None  # drop task (will be reallocated)
+
+        return self
 
     def next_cell(self) -> Optional[tuple[int, int]]:
         """Return the next cell on the planned path, or None if path is empty."""

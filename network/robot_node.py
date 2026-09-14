@@ -63,6 +63,9 @@ class RobotNode:
         # Peers' latest known states {robot_id: dict}
         self.peer_states: dict[str, dict] = {}
 
+        # Running flag
+        self._running: bool = True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -75,6 +78,10 @@ class RobotNode:
         """Return the last received state from each peer robot."""
         return dict(self.peer_states)
 
+    def stop(self) -> None:
+        """Signal the node to stop."""
+        self._running = False
+
     # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
@@ -82,18 +89,18 @@ class RobotNode:
     async def run(self, on_message: Callable[[str, dict], None]) -> None:
         """
         Start the node: launch server + connect to peers + broadcast loop.
-
-        TODO [P2P PERSON]: Implement using asyncio.gather() to run all tasks concurrently.
-
-        Tasks to run concurrently:
-            1. self._serve()            — WebSocket server (receives messages)
-            2. self._connect_to_peers() — maintain peer connections
-            3. self._broadcast_loop()   — send state every 200ms
-            4. self._connect_dashboard()— forward to dashboard
+        All tasks run concurrently via asyncio.gather().
         """
         self._on_message = on_message
-        # TODO: implement with asyncio.gather(...)
-        raise NotImplementedError("P2P person: implement run() with asyncio.gather")
+        self._running = True
+
+        await asyncio.gather(
+            self._serve(),
+            self._connect_to_peers(),
+            self._broadcast_loop(),
+            self._connect_dashboard(),
+            return_exceptions=True,  # Don't crash everything if one task fails
+        )
 
     # ------------------------------------------------------------------
     # Server — receives messages from peers
@@ -102,44 +109,84 @@ class RobotNode:
     async def _serve(self) -> None:
         """
         Start WebSocket server. Peers connect here to send us their state.
-
-        TODO [P2P PERSON]: Use websockets.serve() to listen on self.port.
-        On each incoming message:
-            data = json.loads(message)
-            peer_id = data["robot_id"]
-            self.peer_states[peer_id] = data
-            if self._on_message:
-                self._on_message(peer_id, data)
+        Listens on self.port (e.g. 8001 for R1).
         """
-        raise NotImplementedError("P2P person: implement _serve()")
+        async def _handler(websocket: WebSocketServerProtocol, path: str = "/") -> None:
+            try:
+                async for raw_message in websocket:
+                    try:
+                        data = json.loads(raw_message)
+                        peer_id = data.get("robot_id", "unknown")
+                        self.peer_states[peer_id] = data
+                        if self._on_message:
+                            self._on_message(peer_id, data)
+                    except (json.JSONDecodeError, KeyError):
+                        pass  # Malformed message — ignore
+            except websockets.exceptions.ConnectionClosed:
+                pass
+
+        async with websockets.serve(_handler, "localhost", self.port):
+            print(f"[{self.robot_id}] P2P server listening on port {self.port}")
+            # Keep server alive until stopped
+            while self._running:
+                await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
-    # Client — connects to peers and sends our state
+    # Client — connects to peers and maintains connections
     # ------------------------------------------------------------------
 
     async def _connect_to_peers(self) -> None:
         """
         Connect to all peer robots and maintain those connections.
         Reconnects automatically if a peer goes offline.
-
-        TODO [P2P PERSON]: For each url in self.peer_urls:
-            - Try to connect with websockets.connect(url)
-            - Store in self._peer_connections[url]
-            - If connection drops → wait RECONNECT_DELAY, retry
         """
-        raise NotImplementedError("P2P person: implement _connect_to_peers()")
+        async def _connect_one(url: str) -> None:
+            while self._running:
+                try:
+                    async with websockets.connect(
+                        url,
+                        ping_interval=5,
+                        ping_timeout=10,
+                        open_timeout=5,
+                    ) as ws:
+                        self._peer_connections[url] = ws
+                        print(f"[{self.robot_id}] Connected to peer: {url}")
+                        # Keep connection alive until it drops
+                        while self._running:
+                            await asyncio.sleep(BROADCAST_INTERVAL)
+                except (OSError, websockets.exceptions.WebSocketException):
+                    # Peer is offline — clear connection and retry after delay
+                    self._peer_connections[url] = None
+                    await asyncio.sleep(RECONNECT_DELAY)
+                except Exception:
+                    self._peer_connections[url] = None
+                    await asyncio.sleep(RECONNECT_DELAY)
+
+        # Connect to each peer concurrently
+        tasks = [_connect_one(url) for url in self.peer_urls]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _broadcast_loop(self) -> None:
         """
         Send self._current_state_json to all connected peers every BROADCAST_INTERVAL.
-
-        TODO [P2P PERSON]: Loop every 200ms.
-        For each connection in self._peer_connections.values():
-            if connection is not None:
-                try: await connection.send(self._current_state_json)
-                except: pass  # peer offline, will reconnect
         """
-        raise NotImplementedError("P2P person: implement _broadcast_loop()")
+        # Give the server and connections a moment to start up
+        await asyncio.sleep(1.0)
+
+        while self._running:
+            if self._current_state_json:
+                dead_urls = []
+                for url, conn in self._peer_connections.items():
+                    if conn is not None:
+                        try:
+                            await conn.send(self._current_state_json)
+                        except Exception:
+                            # Connection dropped — will reconnect automatically
+                            dead_urls.append(url)
+                for url in dead_urls:
+                    self._peer_connections[url] = None
+
+            await asyncio.sleep(BROADCAST_INTERVAL)
 
     # ------------------------------------------------------------------
     # Dashboard forwarding
@@ -148,17 +195,43 @@ class RobotNode:
     async def _connect_dashboard(self) -> None:
         """
         Connect to dashboard WebSocket and forward state every tick.
-
-        TODO [P2P PERSON]: Connect to self.dashboard_url.
-        Every BROADCAST_INTERVAL: await conn.send(self._current_state_json)
-        Handle disconnects gracefully (dashboard might not be open yet).
+        Handles disconnects gracefully (dashboard might not be open yet).
         """
-        raise NotImplementedError("P2P person: implement _connect_dashboard()")
+        await asyncio.sleep(1.0)  # Wait for server startup
+
+        while self._running:
+            try:
+                async with websockets.connect(
+                    self.dashboard_url,
+                    ping_interval=10,
+                    ping_timeout=20,
+                    open_timeout=5,
+                ) as ws:
+                    self._dashboard_conn = ws
+                    print(f"[{self.robot_id}] Connected to dashboard: {self.dashboard_url}")
+                    while self._running:
+                        if self._current_state_json:
+                            try:
+                                await ws.send(self._current_state_json)
+                            except Exception:
+                                break
+                        await asyncio.sleep(BROADCAST_INTERVAL)
+            except Exception:
+                # Dashboard not running yet — retry after delay, no crash
+                self._dashboard_conn = None
+                await asyncio.sleep(RECONNECT_DELAY)
 
     async def disconnect(self) -> None:
         """Gracefully close all connections."""
+        self._running = False
         for url, conn in self._peer_connections.items():
             if conn:
-                await conn.close()
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
         if self._dashboard_conn:
-            await self._dashboard_conn.close()
+            try:
+                await self._dashboard_conn.close()
+            except Exception:
+                pass

@@ -75,17 +75,26 @@ class WarehouseGrid:
         Returns True if reservation was successful, False if already
         reserved by a DIFFERENT robot.
         """
-        # TODO [DSA]: Implement reservation logic
-        # Hints:
-        #   - Use time.time() to get current time
-        #   - Only allow if cell is FREE or already reserved by SAME robot
-        #   - Set expires_at = time.time() + duration
-        raise NotImplementedError("DSA person: implement reserve_cell()")
+        self._expire_old_reservations()
+        existing = self.reservations.get((x, y))
+        if existing is not None and existing["robot_id"] != robot_id:
+            # Cell is held by a different robot — cannot reserve
+            return False
+        # Either free, or same robot is re-reserving — allow it
+        self.reservations[(x, y)] = {
+            "robot_id": robot_id,
+            "expires_at": time.time() + duration,
+        }
+        return True
 
     def clear_reservations(self, robot_id: str) -> None:
         """Release all reservations held by robot_id."""
-        # TODO [DSA]: Remove all entries in self.reservations where robot_id matches
-        raise NotImplementedError("DSA person: implement clear_reservations()")
+        keys_to_remove = [
+            cell for cell, data in self.reservations.items()
+            if data["robot_id"] == robot_id
+        ]
+        for key in keys_to_remove:
+            del self.reservations[key]
 
     def _expire_old_reservations(self) -> None:
         """Remove reservations that have passed their expiry time."""
@@ -104,9 +113,15 @@ class WarehouseGrid:
         2. It is not a permanent obstacle
         3. It is not reserved by a DIFFERENT robot
         """
-        # TODO [DSA]: Implement passability check
-        # Hint: call self._expire_old_reservations() first
-        raise NotImplementedError("DSA person: implement is_passable()")
+        self._expire_old_reservations()
+        if not self._in_bounds(x, y):
+            return False
+        if self.cells[y][x] == OBSTACLE:
+            return False
+        existing = self.reservations.get((x, y))
+        if existing is not None and existing["robot_id"] != robot_id:
+            return False
+        return True
 
     def get_neighbors(self, x: int, y: int) -> list[tuple[int, int]]:
         """Return list of valid (x, y) neighbors (4-directional, no diagonals)."""

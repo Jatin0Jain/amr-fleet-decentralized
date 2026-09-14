@@ -35,36 +35,52 @@ def astar(
 
     Returns:
         List of (x, y) tuples from start → goal (inclusive), or None if no path exists.
-
-    Algorithm:
-        Standard A* with:
-        - Manhattan distance heuristic
-        - Extra cost for reserved cells (treated as high-cost, not impassable)
-        - Extra cost from congestion_weights if provided
     """
-    # TODO [DSA]: Implement A* here.
-    #
-    # Pseudocode:
-    #   open_heap = [(f_score, g_score, node)]
-    #   came_from = {}
-    #   g_score = {start: 0}
-    #
-    #   while open_heap:
-    #       _, g, current = heappop(open_heap)
-    #       if current == goal: return reconstruct_path(came_from, current)
-    #
-    #       for neighbor in grid.get_neighbors(*current):
-    #           if not grid.is_passable(*neighbor, robot_id): continue
-    #           new_g = g + 1 + congestion_weights.get(neighbor, 0)
-    #           if new_g < g_score.get(neighbor, inf):
-    #               came_from[neighbor] = current
-    #               g_score[neighbor] = new_g
-    #               f = new_g + manhattan(neighbor, goal)
-    #               heappush(open_heap, (f, new_g, neighbor))
-    #
-    #   return None  # no path found
+    if congestion_weights is None:
+        congestion_weights = {}
 
-    raise NotImplementedError("DSA person: implement astar()")
+    # Edge case: already at goal
+    if start == goal:
+        return [start]
+
+    # open_heap entries: (f_score, g_score, node)
+    # Using g_score as tiebreaker ensures consistent expansion
+    open_heap = []
+    heapq.heappush(open_heap, (manhattan(start, goal), 0, start))
+
+    came_from: dict[tuple, tuple] = {}
+    g_score: dict[tuple, float] = {start: 0}
+    # Track visited to avoid reprocessing
+    closed: set[tuple] = set()
+
+    while open_heap:
+        f, g, current = heapq.heappop(open_heap)
+
+        if current in closed:
+            continue
+        closed.add(current)
+
+        if current == goal:
+            return reconstruct_path(came_from, current)
+
+        for neighbor in grid.get_neighbors(*current):
+            if neighbor in closed:
+                continue
+            # Skip cells that are impassable (obstacles or reserved by others)
+            if not grid.is_passable(*neighbor, robot_id):
+                continue
+
+            # Cost: 1 per step + congestion penalty from ML
+            step_cost = 1.0 + congestion_weights.get(neighbor, 0.0)
+            new_g = g + step_cost
+
+            if new_g < g_score.get(neighbor, float("inf")):
+                came_from[neighbor] = current
+                g_score[neighbor] = new_g
+                f_new = new_g + manhattan(neighbor, goal)
+                heapq.heappush(open_heap, (f_new, new_g, neighbor))
+
+    return None  # No path found
 
 
 def reconstruct_path(

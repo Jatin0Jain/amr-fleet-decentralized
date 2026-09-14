@@ -68,6 +68,10 @@ class NetworkModel:
     def remove_dead_zone(self, x: int, y: int) -> None:
         self.dead_zones.discard((x, y))
 
+    def clear_dead_zones(self) -> None:
+        """Clear all dynamic dead zones (reverting to default or completely empty)."""
+        self.dead_zones = set(DEFAULT_DEAD_ZONES)
+
     def in_dead_zone(self, position: tuple[int, int]) -> bool:
         """Return True if the robot at `position` is in a Wi-Fi dead zone."""
         return tuple(position) in self.dead_zones
